@@ -1,0 +1,34 @@
+# FOLDERS
+.vscode
+.ipynb_checkpoints
+__pycache__
+Model-Outputs
+Testing
+POIs
+Shapefiles
+Profiles
+Weeks
+Visits
+Test-Patterns
+All_Monthly_POIs
+CBG_POI_Probs
+CBG_Visits
+Monthly_NAICs
+Monthly_POIs
+Topic_JSONs
+Monthly_CBG_Topic_Dist
+Jaccards
+Mobility_Logs
+Hourly_Visits
+Batch_Running
+OLD
+Training_Splits
+Logging
+Utility_Notebooks
+Generated_Edges
+# FILES
+test.py
+parsed_data.csv
+Untitled.ipynb 
+test.ipynb
+Spatial Join POI Analysis .ipynb
