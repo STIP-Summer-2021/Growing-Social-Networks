@@ -1,7 +1,7 @@
 # Setup
 
-# Generated network with <K> = 20.
-<img src="Figs/network.svg" style="background-color:#ffffff">
+# Generated network with K = 20
+<img src="Figs/network.svg" >
 
 
 This is the general file structure for the project. 
