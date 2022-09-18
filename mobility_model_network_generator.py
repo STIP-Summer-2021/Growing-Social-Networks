@@ -1,13 +1,9 @@
-import os, sys, random 
-import json
+import os, random, json
 import numpy as np
 import pandas as pd
-from scipy import sparse
-import networkx as nx
 from datetime import datetime
 from calendar import monthrange
 import matplotlib.pyplot as plt
-from collections import Counter
 cwd = os.path.dirname(os.path.abspath(__file__)) # reference to the path of this file
 
 class Constants:
