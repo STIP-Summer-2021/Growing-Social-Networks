@@ -535,6 +535,3 @@ class Model:
             for agent in self.agents:
                 for friend in agent.friends:
                     print(agent.id, friend.id, sep=',', file=out)
-        
-        # pd.DataFrame(avg_degree_time, columns=['avg_deg']).to_csv(r'Outputs\Degree_Over_Time\k={}_n={}.csv'.format(self.k, len(self.agents)), index_label='tick')
-
