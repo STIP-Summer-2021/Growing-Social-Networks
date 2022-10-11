@@ -10,12 +10,7 @@ class Constants:
     '''
     Class that contains references to different constant values. 
     '''
-    SUSCEPTIBLE = 'S'
-    PRE_SYMPTOMATIC = 'Ip'
-    ASYMPTOMATIC = 'Ia'
-    SYMPTOMATIC = 'Is'
-    EXPOSED = 'E'
-    RECOVERED = 'R'
+
     BUCKET_LOOKUP = {arrival_time:bucket for bucket, (start, stop) in enumerate([(0,1), (1,4), (4,8), (8, 16), (16, 96)]) for arrival_time in range(start, stop)}
     HOUSEHOLD_IDS = [str(i) for i in range(1,8)]
     TICKS = range(96)
@@ -216,22 +211,15 @@ class Agent:
     self.current_loc = Reference to the current location of the agent
     self.home_obj = Reference to the home object of the agent
 
-    self.infection_status = The current infection status of the agent 
-
     self.current_interactions = A set to check for interactions 
-    self.current_infections = The number of infections that an agent had per tick
-
     self.total_interactions = The total number of interactions the agent had
-    self.total_infections = The total number of agents that this agent infected
 
     self.schedule = List containing references to POIs the agent will go to     
 
-    self.incubation_time = Agents undergo an incubation period before they reach either the symptomatic or asymptomatic phase
-    self.infection_time = Amount of time that an agent spends in either the symptomatic or asymptomatic phases
 
     '''
     total = 0 # counter to create agent ID 
-    def __init__(self, home_obj, main_model, infection_status=Constants.SUSCEPTIBLE, topic=0):
+    def __init__(self, home_obj, main_model, topic=0):
         self.id = Agent.total # unique ID
         self.model = main_model
         self.friends = list()
@@ -241,8 +229,6 @@ class Agent:
         self.home_obj = home_obj
         self.home_fips = home_obj.cbg.cbg_fips
         
-        # AGENTS START AS SUSCEPTIBLE 'S'
-        self.infection_status = infection_status 
         self.lifetime_trips = 0
 
         self.model.agents.append(self)
@@ -347,20 +333,22 @@ class Agent:
 
         next_loc.agents.append(self)  # move to next location
         self.current_loc = next_loc  # store the next location as current location
-        self.check_for_friends()
-     # = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = 
+        self.check_for_friends() #has the possibility to make a new friend with every location
 
     def check_for_friends(self):       
         #check to see if they become friends
         if (np.random.random() < .5) and (len(self.current_loc.agents) > 1):
-            nf = random.choice(self.current_loc.agents)
-            if nf in self.friends or nf == self:
+            new_friend = random.choice(self.current_loc.agents)
+            #doesn't become friends if they are already friends, or the new friend is themself
+            if new_friend in self.friends or new_friend == self:
                 return
             # increase the count, this is so we don't have to use the sparse matrix 
             self.model.total_edges += 2
             # store agent pointers 
-            nf.friends.append(self)
-            self.friends.append(nf)
+            new_friend.friends.append(self)
+            self.friends.append(new_friend)
+
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = 
 
 class Model:
     '''
@@ -372,18 +360,9 @@ class Model:
         
         - When a CBG object is created, it initializes a population of agents equivalent to the number of households recorded in census data.
     
-    2. A subset of agents are selected to be initially infected.
-        
-        - A CBG can be selected as a seed for the initial infection or can be randomly distributed across the simulation.
-        
-        - The logic for this will likely need to be redone as currently only a proportion of a population is used. This means that if a random 
-          selection of agents are selected, the number of infected agents will be higher. For example, if 5% of agents are selected for a CBG 
-          of 1000 agents, there will be 100 agents infected. If 5% are chosen with a random selection the model may have 500,000 agents that 
-          would mean that there are 5000 agents infected. 
-    
-    3. POIs are read in and created. 
+    2. POIs are read in and created. 
  
-    4. NAICS codes are read in and created. 
+    3. NAICS codes are read in and created. 
 
     year = model year
     month = model month
@@ -431,13 +410,8 @@ class Model:
         self.create_pois()
         self.create_cbgs()
         self.create_naics()
-        # self.create_friend_matrix()
 
         self.interactable_places = self.all_pois + self.households 
-
-    # def create_friend_matrix(self):
-    #     total_agents = len(self.agents)
-    #     self.friend_matrix = sparse.lil_matrix((total_agents, total_agents))
 
     def create_pois(self):
         # read the poi data that we ran the LDA on
@@ -487,9 +461,9 @@ class Model:
 
     def create_cbgs(self):
         # read the raw cbg data 
-        cbg_data = pd.read_csv(os.path.join(cwd, 'Data', f'{self.cbg_file}.csv'), dtype={'census_block_group':str}).set_index('census_block_group')
+        cbg_data = pd.read_csv(os.path.join(cwd, 'Data', 'CBG_Home_Info', f'{self.cbg_file}.csv'), dtype={'census_block_group':str}).set_index('census_block_group')
 
-        # load the LDA topic dist from the target year and month 
+        # load the LDA topic dist from the target year and month
         cbg_topic_dist = pd.read_csv(os.path.join(cwd, 'Data', 'Monthly_CBG_Topic_Dist', f'{self.year}_{self.month:02d}.csv'), dtype={'census_block_group':str}).set_index('census_block_group')
         
         # get the number of cell phones seen in the cbg during the simulated month and seed the population with that number per cbg
