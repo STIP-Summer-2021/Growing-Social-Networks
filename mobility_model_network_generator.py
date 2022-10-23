@@ -16,6 +16,8 @@ class Constants:
     SYMPTOMATIC = 'Is'
     EXPOSED = 'E'
     RECOVERED = 'R'
+    SICK = [PRE_SYMPTOMATIC, ASYMPTOMATIC, SYMPTOMATIC, EXPOSED]
+    NO_SPREAD = [SUSCEPTIBLE, RECOVERED]
     BUCKET_LOOKUP = {arrival_time:bucket for bucket, (start, stop) in enumerate([(0,1), (1,4), (4,8), (8, 16), (16, 96)]) for arrival_time in range(start, stop)}
     HOUSEHOLD_IDS = [str(i) for i in range(1,8)]
     TICKS = range(96)
@@ -57,6 +59,10 @@ class Place:
     
     def reset_agent_dict(self):
         self.agents = []#{Constants.SUSCEPTIBLE:[], Constants.ASYMPTOMATIC:[], Constants.SYMPTOMATIC:[], Constants.PRE_SYMPTOMATIC:[], Constants.EXPOSED:[], Constants.RECOVERED:[]}
+
+    def interact_agents(self):
+        for agent in self.agents:
+            agent.interact(random.choice(self.agents))
 
 class POI(Place):
     '''
@@ -102,7 +108,6 @@ class POI(Place):
         for hour, agents in self.hourly_logger.items():
             self.hour_visits[hour] += len(agents)
         
-         
         self.hourly_logger = {i:set() for i in range(24)}
 
     def generate_dwell_dist(self, bucketed_dict):
@@ -154,7 +159,6 @@ class CBG:
         self.model = main_model 
         self.cbg_fips = cbg_fips
         self.household_sizes = row_data[Constants.HOUSEHOLD_IDS].values.astype(int) # get the household size array from the row data
-        # self.census_pop = row_data['total_pop']
         self.propensity_to_leave = row_data['Perc_Stay_Home']
         self.topic_probs = eval(row_data['CBG_Topic_Prob'])
         self.num_phones = row_data['number_devices_residing']
@@ -241,9 +245,11 @@ class Agent:
         self.home_obj = home_obj
         self.home_fips = home_obj.cbg.cbg_fips
         
+        self.meeting_invites = []
+        self.invitable_friends = 0 # this is for choosing how many friends to invite, after friends are generated will len(self.friends) if self.model.num_friends_co_visiting > len(self.friends) else self.model.num_friends_co_visiting
+        
         # AGENTS START AS SUSCEPTIBLE 'S'
         self.infection_status = infection_status 
-        self.lifetime_trips = 0
 
         self.model.agents.append(self)
         Agent.total += 1
@@ -263,80 +269,78 @@ class Agent:
         if self.model.use_LDA and not self.model.use_prob: # LDA
             if not with_replacement: # if we use no replacement you can only have up to the number of non-zero probs 
                 n = n if n < self.model.poi_topics[self.topic]['non_zeros'] else self.model.poi_topics[self.topic]['non_zeros']
-            
-            locs = np.random.choice(self.model.poi_topics[self.topic]['ids'], n, p=self.model.poi_topics[self.topic]['probs'], replace=with_replacement) # select some random POIs
-        
+            locs = np.random.choice(self.model.poi_topics[self.topic]['ids'], n, p=self.model.poi_topics[self.topic]['probs'], replace=with_replacement) # select some random POIs      
 
         elif not self.model.use_LDA and self.model.use_prob: # Prob Model
             if not with_replacement:  
                 n = n if n < self.model.poi_topics[self.topic]['non_zeros'] else self.model.poi_topics[self.topic]['non_zeros']
-
             locs = np.random.choice(self.model.poi_topics[self.topic]['ids'], n, p=self.model.poi_topics[self.topic]['probs'], replace=with_replacement) 
         
-
         elif not self.model.use_LDA and not self.model.use_prob: # Random Model
             locs = np.random.choice(self.model.poi_topics[self.topic]['ids'], n, replace=with_replacement)
         
         return locs
 
+    def schedule_visit(self, start, end, poi):
+        if len(self.scheduled_times) == self.desired_visits: return False # if they already have enough visits, send this to break from the rest of the attempted schedules
+        for s,e,_ in self.scheduled_times:
+            if not all((self.check_range(s, e, start), self.check_range(s, e, end), self.check_range(start, end, s), self.check_range(start, end, e))): # if the visit has overlap with a currently scheduled visit, give up
+                return True # this trip was skipped, but we need to keep attempting to schedule them using a none to check in the schedule building logic 
+        
+        self.scheduled_times.append((start, end, poi)) # success, save the visit start and end and POI 
+        self.schedule[start:end] = [poi for _ in range(end-start)] # assign the agent a place
+        return True        
 
     def build_schedule(self, num_locations):
-        # Daily schedule builder for agents. 
+        self.schedule = [0]*96 # 0's in the schedule represent the home object for each agent - their default schedule is only at home
+        self.scheduled_times = [] # list of tuples for the start and end times of accepted visits as well as the POI
+        self.desired_visits = num_locations
+        self.vists_from_friends = 0 
+        self.current_visits = 0
+        
+        if np.random.random() > self.home_obj.cbg.propensity_to_leave: # if the agent decides to go out for the day (based on the percent of people that stay home in their CBG)
+            self.check_invites() # try to go to your friends locations
+            self.vists_from_friends = len(self.scheduled_times)
+            self.build_schedule_from_models() # fill the leftover spots with other poi visits 
+            self.current_visits = len(self.scheduled_times)
 
-        temp_schdeule = list(np.zeros(96)) # 0's in the schedule represent the home object for each agent 
-        time_away = 0
-        self.num_visits = 0
-        # if the agent is visiting places and rolls sucessfully for leaving their home
-        if num_locations and np.random.random() > self.home_obj.cbg.propensity_to_leave:
+            # invite friends to a random place
+            if len(self.scheduled_times): # this won't do anything until agents have some actual friends generated since their N of invitable_places = 0 so none will get pulled 
+                invite = random.choice(self.scheduled_times) # choose a random place to invite friends to 
+                for friend in random.choices(self.friends, k=self.invitable_friends): # choose some friends at random
+                    friend.meeting_invites.append(invite) # invite the friend
+        
+            self.scheduled_times = [] # do this to free some memory since we don't need to look back at it 
+
+    def check_invites(self):
+        np.random.shuffle(self.meeting_invites) # randomly go through invites 
+        for (start, end, poi) in self.meeting_invites:
+            if not self.schedule_visit(start, end, poi): break # schedule the friends visits, if they fill up stop 
+        self.meeting_invites = [] # since we have already checked invites, get rid of them 
+
+
+    def build_schedule_from_models(self):
+        num_locations = self.desired_visits - len(self.scheduled_times) # pull the number of leftover visits 
+        if num_locations > 0: # can't schedule negatives or 0 visits 
             if num_locations > len(self.model.poi_topics[self.topic]) and (self.model.use_LDA or self.model.use_prob): # sometimes the prob model will have no observed trips for some cbgs so catch it here
-                if not len(self.model.poi_topics[self.topic]):
-                    self.schedule = temp_schdeule
-                    return
-                num_locations = len(self.model.poi_topics[self.topic]) 
+                if not len(self.model.poi_topics[self.topic]): # if there are no pois in that topic don't send them anywhere 
+                    return 
+                num_locations = len(self.model.poi_topics[self.topic]) # some CBGs only have a certain number of pois associated with them, this catches that 
             
-
-            times = [] # holding var for accepted times
-
             # UPDATED METHOD FOR SELCTING LOCATIONS 
             # instead of selecting here, I wrote a quick method that uses different ways of selecting the locations that an agent goes to 
             # you can change those parameters either in this function call or just by changing the default parameters of that method. 
-            for loc in self.get_locs(num_locations): # go through each selected POI 
-                loc = self.model.pois[loc] # lookup the POI
+            for poi in self.get_locs(num_locations): # pull N pois to try and schedule 
+                poi = self.model.pois[poi] # lookup the POI
     
-                start = loc.get_most_likely_time() # pull a start time
-                time = loc.get_agent_dwell_time() + 1 # slicing needs an extra index, doesn't change real dwell time
+                start = poi.get_most_likely_time() # pull a start time
+                time = poi.get_agent_dwell_time() + 1 # pull a visit length -- slicing needs an extra index, doesn't change real dwell time
 
-                end = start + time # pull a dwell length 
-                end = 95 if end > 95 else end # if the end time goes outside of the day set it to the end 
-                
-                _stop = False
+                end = start + time # calculate the end time based on arrival time + visit duration 
+                end = 96 if end > 96 else end # if the end time goes outside of the day set it to the end 
+                 
+                if not self.schedule_visit(start, end, poi): break # if the schedule is full, stop
 
-                for s,e in times:
-                    if not all((self.check_range(s, e, start), self.check_range(s, e, end), self.check_range(start, end, s), self.check_range(start, end, e))):
-                        _stop = True
-                        break 
-
-                if _stop: continue    
-                
-                # logging info 
-                # loc.dwell_logger[Constants.BUCKET_LOOKUP[time-1]] += 1 # log the dwell time associated with the visit (time - 1) is for looking up the actual dwell time
-                # loc.visitor_cbg[self.home_fips] = loc.visitor_cbg.get(self.home_fips, 0) + 1 # repeat counts
-                # for tick in range(start, end):
-                #     loc.hourly_logger[tick // 4].add(self)
-
-                # loc.agent_logging.add(self)
-                # loc.tot_visits += 1
-
-
-                times.append((start, end)) # success!!
-                temp_schdeule[start:end] = [loc for _ in range(end-start)] # assign the agent a place
-                time_away += time
-
-            self.num_visits = len(times)
-
-        self.lifetime_trips += self.num_visits
-        self.schedule = temp_schdeule
-        self.time_away = time_away
 
     def step(self, tick):
         '''
@@ -345,15 +349,15 @@ class Agent:
         next_loc = self.schedule[tick]
         next_loc = next_loc if next_loc else self.home_obj
 
-        next_loc.agents.append(self)  # move to next location
-        self.current_loc = next_loc  # store the next location as current location
-        self.check_for_friends()
+        next_loc.agents.append(self)  # move to next location FIX, needs to have infection statuses again
+        self.current_loc = next_loc  # store the next location as current location 
+        if not self.model.reached_k: self.check_for_friends() # only add friends if the model has not converged
      # = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = 
 
     def check_for_friends(self):       
         #check to see if they become friends
         if (np.random.random() < .5) and (len(self.current_loc.agents) > 1):
-            nf = random.choice(self.current_loc.agents)
+            nf = random.choice(self.current_loc.agents) # FIX
             if nf in self.friends or nf == self:
                 return
             # increase the count, this is so we don't have to use the sparse matrix 
@@ -361,7 +365,22 @@ class Agent:
             # store agent pointers 
             nf.friends.append(self)
             self.friends.append(nf)
-
+    
+    
+    def interact(self, other):
+        if other == self: return # if it's me
+        elif other.infection_status in Constants.NO_SPREAD and self.infection_status in Constants.NO_SPREAD: return # if we're both well or recovered
+        elif other.infection_status in Constants.SICK and self.infection_status in Constants.SICK: return # if we're both sick
+        elif other.infection_status in Constants.SICK and self.infection_status == Constants.SUSCEPTIBLE:
+            self.roll_for_infection(other.infection_status)
+        elif True:
+            pass
+        
+        
+        
+    def roll_for_infection(self, status):
+        pass
+            
 class Model:
     '''
     Main model class for the simulation. 
@@ -396,7 +415,7 @@ class Model:
     use_prob - uses the prob model to choose location 
     ''' 
 
-    def __init__(self, save_name='', use_LDA=False, use_prob=False, year=2019, month=1, sim_year=2019, sim_month=1, k=4, input_cbg_file='scaled_houses_100k', print_info=False):
+    def __init__(self, save_name='', use_LDA=False, use_prob=False, year=2019, month=1, k=4, input_cbg_file='scaled_houses_100k', print_info=False, num_friends_co_visiting=1):
         assert not (use_LDA and use_prob), 'Cannot use both the LDA Model and Prob Model'
         Agent.total = 0
         self.agents = []
@@ -409,6 +428,9 @@ class Model:
         self.naics = {}
         
         self.k = k
+        self.reached_k = False
+        self.num_friends_co_visiting = num_friends_co_visiting
+
         self.current_tick = 0
         self.total_edges = 0
         
@@ -417,27 +439,17 @@ class Model:
 
         self.year = year
         self.month = month
-        self.sim_year = sim_year 
-        self.sim_month = sim_month
 
         self.mobility_model_type = ''
         self.print_info = print_info
         self.cbg_file = input_cbg_file
         self.save_name = save_name
         
-
-        self.days = monthrange(sim_year, sim_month)[1]
-
         self.create_pois()
         self.create_cbgs()
         self.create_naics()
-        # self.create_friend_matrix()
 
         self.interactable_places = self.all_pois + self.households 
-
-    # def create_friend_matrix(self):
-    #     total_agents = len(self.agents)
-    #     self.friend_matrix = sparse.lil_matrix((total_agents, total_agents))
 
     def create_pois(self):
         # read the poi data that we ran the LDA on
@@ -487,13 +499,13 @@ class Model:
 
     def create_cbgs(self):
         # read the raw cbg data 
-        cbg_data = pd.read_csv(os.path.join(cwd, 'Data', f'{self.cbg_file}.csv'), dtype={'census_block_group':str}).set_index('census_block_group')
+        cbg_data = pd.read_csv(os.path.join(cwd, 'Data', 'CBG_Home_Info', f'{self.cbg_file}.csv'), dtype={'census_block_group':str}).set_index('census_block_group')
 
         # load the LDA topic dist from the target year and month 
         cbg_topic_dist = pd.read_csv(os.path.join(cwd, 'Data', 'Monthly_CBG_Topic_Dist', f'{self.year}_{self.month:02d}.csv'), dtype={'census_block_group':str}).set_index('census_block_group')
         
         # get the number of cell phones seen in the cbg during the simulated month and seed the population with that number per cbg
-        cbg_panel_data = pd.read_csv(os.path.join(cwd, 'Data', 'CBG_Visits', f'{self.sim_year}_{self.sim_month:02d}.csv'), dtype={'census_block_group':str}).set_index('census_block_group')
+        cbg_panel_data = pd.read_csv(os.path.join(cwd, 'Data', 'CBG_Visits', f'{self.year}_{self.month:02d}.csv'), dtype={'census_block_group':str}).set_index('census_block_group')
         
         cbg_data = pd.concat([cbg_data, cbg_topic_dist, cbg_panel_data], axis=1).fillna(0)
 
@@ -502,36 +514,51 @@ class Model:
             self.cbgs[cbg] = CBG(cbg, row, self)
 
 
-    def step(self):
+    def step(self, spread_disease=True):
         np.random.shuffle(self.agents)  # for random agent activation
         tick = self.current_tick % 96
 
         if not tick:  # end of the day
-            # this logic was moved to build schedules
             num_visits = np.round(np.random.lognormal(1, .5, len(self.agents))).astype(int)  # generated from the paper distribution
+            self.proposed_visits = num_visits
             for agent, visits in zip(self.agents, num_visits):
-                agent.build_schedule(visits)
+                agent.build_schedule(visits) # build a schedule with N visits from the generated distribution 
 
         for agent in self.agents:  # step agents to next location in their schedule
             agent.step(tick)
 
+    
         for place in self.interactable_places:  # loop through list of homes and pois to interact agents
+            if spread_disease: pass # interact agents TODO 
             place.reset_agent_dict()  # then reset that places agent dict
 
         self.current_tick += 1
-        
+    
+
+    def generate_network(self):
+        pass 
+
+
     def run(self):
+        if self.print_info: print('Generating social network.')
         avg_degree = 0 
         avg_degree_time = []
         while avg_degree <= self.k:
             s = datetime.now()
-            self.step()
+            self.step(spread_disease=False) # just move the agents around, don't interact them while building social networks 
             avg_degree = self.total_edges / len(self.agents)
             avg_degree_time.append(avg_degree)
             if self.print_info: print(f'Day: {self.current_tick//96}\tTick: {self.current_tick}\tDeg: {avg_degree}\tElapsed: {datetime.now() - s}')
         
-        with open(r'Generated_Edges\k={}_n={}.csv'.format(self.k, len(self.agents)), 'w+') as out:
-            print('Source,Target', file=out)
-            for agent in self.agents:
-                for friend in agent.friends:
-                    print(agent.id, friend.id, sep=',', file=out)
+        if self.print_info: print('Finished generating network.')
+
+        # store the number of available friends to invite when sending invites out to other friends
+        for agent in self.agents:
+            # if the agent has fewer friends than the number of friends to invite, set this variable to be the number of their friends 
+            agent.invitable_friends = len(agent.friends) if len(agent.friends) < self.model.num_friends_co_visiting else self.model.num_friends_co_visiting
+
+        # with open(r'Generated_Edges\k={}_n={}.csv'.format(self.k, len(self.agents)), 'w+') as out:
+        #     print('Source,Target', file=out)
+        #     for agent in self.agents:
+        #         for friend in agent.friends:
+        #             print(agent.id, friend.id, sep=',', file=out)
